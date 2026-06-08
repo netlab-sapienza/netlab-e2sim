@@ -1,0 +1,116 @@
+#!/bin/bash
+
+## dependencies
+set -x
+
+DEBUG=0
+OAI_PROTOBUF=1
+
+root_folder=$(pwd)
+
+function build_json_from_source(){
+git submodule init && git submodule update
+cd $root_folder/e2sm_examples/kpm_e2sm/nlohmann_json_release
+mkdir build || true
+cd build/
+cmake .. -DCMAKE_C_COMPILER=gcc-9 -DCMAKE_CXX_COMPILER=g++-9
+make -j ${nproc}
+make install
+ldconfig
+}
+
+function clean_build(){
+rm -rf $root_folder/build
+}
+
+function install_dependencies(){
+apt-get update && apt-get install -y \
+  gcc-9 \
+  g++-9 \
+  build-essential \
+  git \
+  cmake \
+  libsctp-dev \
+  lksctp-tools \
+  autoconf \
+  automake \
+  libtool \
+  bison \
+  flex \
+  libboost-all-dev
+
+  update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90
+  update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90
+
+build_json_from_source
+}
+
+function print_help(){
+echo "Usage:"
+echo "-h: print this message"
+echo "-i: install required dependencies"
+echo "-c: clean build files"
+exit 1
+}
+
+
+until [ -z "$1" ]
+  do
+    case "$1" in
+       -h)
+            print_help
+            shift;;
+       -i)
+            install_dependencies
+            shift;;
+       -c)
+	    clean_build
+	    shift;;
+        *)
+           print_help
+	   break;;
+     esac
+done
+
+# this is the main code
+# reset to root folder
+cd $root_folder
+
+CURR_DIR=$(pwd)
+
+# build e2sim
+rm -Rf build
+mkdir build
+cd build
+cmake .. -DCMAKE_C_COMPILER=gcc-9 -DCMAKE_CXX_COMPILER=g++-9
+make -j ${nproc} package
+cmake .. -DDEV_PKG=1
+make -j ${nproc} package
+make -j ${nproc} install
+ldconfig
+
+# unistall old versions
+apt-get remove --purge -y e2sim-dev
+apt-get remove --purge -y e2sim
+
+# install new ones
+dpkg --install $(pwd)/e2sim*
+#dpkg --install ./e2sim-dev_?.?.?_amd64.deb
+
+
+# setup debug field
+echo -e "\n[`date`] Setting metrics DEBUG field to ${DEBUG}\n"
+sed -i "s/^#define DEBUG.*/#define DEBUG ${DEBUG}/g" ${CURR_DIR}/e2sm_examples/kpm_e2sm/src/kpm/bs_connector.hpp
+
+# setup protobuf field
+echo -e "\n[`date`] Setting OAI_PROTOBUF field to ${OAI_PROTOBUF}\n"
+sed -i "s/^#define OAI_PROTOBUF.*/#define OAI_PROTOBUF ${OAI_PROTOBUF}/g" ${CURR_DIR}/e2sm_examples/kpm_e2sm/src/kpm/kpm_callbacks.hpp
+
+# build example
+cd ${CURR_DIR}/e2sm_examples/kpm_e2sm/
+rm -Rf build
+mkdir build
+cd build
+cmake .. -DCMAKE_C_COMPILER=gcc-9 -DCMAKE_CXX_COMPILER=g++-9
+make -j ${nproc}
+
