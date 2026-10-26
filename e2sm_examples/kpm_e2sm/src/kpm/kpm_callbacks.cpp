@@ -1124,7 +1124,10 @@ void callback_kpm_subscription_request(E2AP_PDU_t *sub_req_pdu) {
 
   // start report loop in a dedicated thread
 	if (triggerDef->buf || (OAI_PROTOBUF && protobuf_payload_len > 0)) {
-		std::string trigger_str((char*) triggerDef->buf);
+		std::string trigger_str;
+		if (triggerDef->buf && triggerDef->size > 0) {
+			trigger_str.assign((char*) triggerDef->buf, triggerDef->size);
+		}
 
 		long *ric_req_id = (long*) calloc(1, sizeof(long));
 		ric_req_id[0] = requestorId;

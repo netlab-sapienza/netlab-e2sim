@@ -6,6 +6,9 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <boost/asio.hpp>
+#include <atomic>
+#include <mutex>
+#include <vector>
 
 extern "C" {
   #include "csv_reader.h"
@@ -17,9 +20,14 @@ extern "C" {
   #include "E2AP-PDU.h"
 }
 
-int report_data_nrt_ric = 1;
-uint8_t *indication_request_buffer;
-int indication_request_length;
+static std::atomic<bool> report_data_nrt_ric{true};
+static std::atomic<bool> protobuf_reporter_active{false};
+static std::mutex protobuf_request_mutex;
+static std::vector<uint8_t> protobuf_request;
+static long protobuf_requestor_id = 0;
+static long protobuf_instance_id = 0;
+static long protobuf_function_id = 0;
+static long protobuf_action_id = 0;
 
 // handle timer got from RIC Subscription Request
 // timer is in seconds
@@ -39,14 +47,28 @@ void handleTimer(E2Sim* e2sim, int* timer, long* ric_req_id, long* ric_instance_
   report_data_nrt_ric = 1;
 
   if (OAI_PROTOBUF) {
-    // saving received buffer in global variable because then a thread will use it (safely, since it is read only)
-    // if we pass it directly to the thread, since the scope is local to this function, the behaviour will be undeifined
-    indication_request_buffer = (uint8_t *)calloc(sizeof(uint8_t), indreq_buflen);
-    indication_request_length = indreq_buflen;
-    memcpy(indication_request_buffer, indreq_buff, indreq_buflen);
-
-    std::thread(periodicDataReportOaiProtobuf, e2sim, timer, seq_num, ric_req_id, ric_instance_id, 
-      ran_function_id, action_id).detach();
+    // A reconnect may produce a new subscription while the old reporter still
+    // owns UDP port 6600. Refresh its request instead of binding a second socket.
+    {
+      std::lock_guard<std::mutex> lock(protobuf_request_mutex);
+      protobuf_request.assign(indreq_buff, indreq_buff + indreq_buflen);
+      protobuf_requestor_id = ric_req_id[0];
+      protobuf_instance_id = ric_instance_id[0];
+      protobuf_function_id = ran_function_id[0];
+      protobuf_action_id = action_id[0];
+    }
+    bool expected = false;
+    if (!protobuf_reporter_active.compare_exchange_strong(expected, true)) {
+      fprintf(stderr, "Updating existing protobuf reporter subscription; no second UDP bind\n");
+      return;
+    }
+    try {
+      std::thread(periodicDataReportOaiProtobuf, e2sim, timer, seq_num, ric_req_id, ric_instance_id,
+        ran_function_id, action_id).detach();
+    } catch (...) {
+      protobuf_reporter_active = false;
+      throw;
+    }
     fprintf(stderr, "periodicDataReportOaiProtobuf thread created successfully\n");
   }
   else {
@@ -107,11 +129,11 @@ void periodicDataReport(E2Sim* e2sim, int* timer, long seqNum, long* ric_req_id,
 void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *ric_req_id, long *ric_instance_id,
                         long *ran_function_id, long *action_id)
 {
-
-  long requestorId = ric_req_id[0];
-  long instanceId = ric_instance_id[0];
-  long ranFunctionId = ran_function_id[0];
-  long actionId = action_id[0];
+  (void)e2sim;
+  (void)ric_req_id;
+  (void)ric_instance_id;
+  (void)ran_function_id;
+  (void)action_id;
   //char *payload = NULL;
   // E2AP_PDU *e2ap_pdu = (E2AP_PDU*)calloc(1,sizeof(E2AP_PDU));
 
@@ -131,34 +153,51 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
   boost::asio::ip::udp::endpoint remote_endpoint_in;
   in_socket.open(boost::asio::ip::udp::v4());
   remote_endpoint_in = boost::asio::ip::udp::endpoint(boost::asio::ip::address::from_string("127.0.0.1"), in_port);
-  in_socket.bind(remote_endpoint_in);
+  boost::system::error_code bind_error;
+  in_socket.bind(remote_endpoint_in, bind_error);
+  if (bind_error) {
+    fprintf(stderr, "KPM reporter cannot bind UDP port %d: %s\n", in_port,
+            bind_error.message().c_str());
+    protobuf_reporter_active = false;
+    return;
+  }
   //in_socket.bind(remote_endpoint_in, in_port);
   boost::system::error_code err;
 
-  char recvbuf[4096];
+  char recvbuf[4097];
   size_t recvlen;
 
   E2AP_PDU *e2ap_pdu = NULL;
 
   while (report_data_nrt_ric)
   {
+    long requestorId, instanceId, ranFunctionId, actionId;
+    std::vector<uint8_t> request;
+    {
+      std::lock_guard<std::mutex> lock(protobuf_request_mutex);
+      request = protobuf_request;
+      requestorId = protobuf_requestor_id;
+      instanceId = protobuf_instance_id;
+      ranFunctionId = protobuf_function_id;
+      actionId = protobuf_action_id;
+    }
 
     fprintf(stderr, "timer expired for requestorId %ld, instanceId %ld, ranFunctionId %ld, actionId %ld: %d s\n",
             requestorId, instanceId, ranFunctionId, actionId, timer[0]);
-    fprintf(stderr, "Sending indication request buffer to gnb, size %d\n", indication_request_length);
+    fprintf(stderr, "Sending indication request buffer to gnb, size %zu\n", request.size());
     
     fprintf(stderr,"about to print buffer in periodicDataReportOaiProtobuf\n");
-    for(int i = 0; i < indication_request_length; i++){
-      fprintf(stderr,"---%hhx\n", indication_request_buffer[i]);
+    for(size_t i = 0; i < request.size(); i++){
+      fprintf(stderr,"---%hhx\n", request[i]);
     }
     fprintf(stderr, "\n");
     
     // payload = (char*) "{\"timestamp\":1602706183796,\"slice_id\":0,\"dl_bytes\":53431,\"dl_thr_mbps\":2.39,\"ratio_granted_req_prb\":0.02,\"slice_prb\":6,\"dl_pkts\":200}";
-    out_socket.send_to(boost::asio::buffer(indication_request_buffer, indication_request_length), remote_endpoint_out, 0, err);
+    out_socket.send_to(boost::asio::buffer(request), remote_endpoint_out, 0, err);
 
     fprintf(stderr, "Waiting for response from gnb...");
     std::this_thread::sleep_for(sleep_duration);
-    recvlen = in_socket.receive_from(boost::asio::buffer(recvbuf), remote_endpoint_in);
+    recvlen = in_socket.receive_from(boost::asio::buffer(recvbuf, sizeof(recvbuf) - 1), remote_endpoint_in);
     fprintf(stderr, " recevied %lu bytes\n", recvlen);
 
     // append null terminator to payload such that the buffer can be processed by the kind-of-stupid following encoders
@@ -185,6 +224,7 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
       seqNum++;
     }
   }
+  protobuf_reporter_active = false;
 }
 
 
