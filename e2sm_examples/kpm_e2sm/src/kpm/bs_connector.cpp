@@ -2,6 +2,7 @@
 #include "encode_e2apv1.hpp"
 #include "encode_kpm.hpp"
 #include "kpm_callbacks.hpp"
+#include "indication_sequence.hpp"
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -112,7 +113,7 @@ void periodicDataReport(E2Sim* e2sim, int* timer, long seqNum, long* ric_req_id,
 
     // ASN.1 encode payload and header
     encode_and_send_ric_indication_report_metrics_buffer(payload, strlen(payload), seqNum, requestorId, instanceId, ranFunctionId, actionId);
-    seqNum++;
+    seqNum = next_indication_sequence(seqNum);
   }
   
   std::chrono::seconds sleep_duration(timer[0]);
@@ -221,7 +222,7 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
 
       // ASN.1 encode payload and header
       encode_and_send_ric_indication_report_metrics_buffer(recvbuf, recvlen, seqNum, requestorId, instanceId, ranFunctionId, actionId);
-      seqNum++;
+      seqNum = next_indication_sequence(seqNum);
     }
   }
   protobuf_reporter_active = false;

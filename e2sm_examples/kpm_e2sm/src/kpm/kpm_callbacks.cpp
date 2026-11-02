@@ -50,6 +50,7 @@ extern "C" {
 }
 
 #include "kpm_callbacks.hpp"
+#include "indication_sequence.hpp"
 #include "encode_kpm.hpp"
 
 #include "encode_e2apv1.hpp"
@@ -416,7 +417,7 @@ void run_report_loop(long requestorId, long instanceId, long ranFunctionId, long
 
 					e2sim.encode_and_send_sctp_data(pdu_cucp_ue);
 
-					seqNum++;
+					seqNum = (seqNum + 1) % 65536;
 
 					std::this_thread::sleep_for (std::chrono::milliseconds(50));
 
@@ -470,7 +471,7 @@ void run_report_loop(long requestorId, long instanceId, long ranFunctionId, long
 
 					e2sim.encode_and_send_sctp_data(pdu_cuup_ue);
 
-					seqNum++;
+					seqNum = (seqNum + 1) % 65536;
 
 					std::this_thread::sleep_for (std::chrono::milliseconds(50));
 
@@ -526,7 +527,7 @@ void run_report_loop(long requestorId, long instanceId, long ranFunctionId, long
 
 					e2sim.encode_and_send_sctp_data(pdu_du_ue);
 
-					seqNum++;
+					seqNum = (seqNum + 1) % 65536;
 
 					std::this_thread::sleep_for (std::chrono::milliseconds(50));
 
@@ -646,7 +647,7 @@ void run_report_loop(long requestorId, long instanceId, long ranFunctionId, long
 
 					e2sim.encode_and_send_sctp_data(pdu_style5);
 
-					seqNum++;
+					seqNum = (seqNum + 1) % 65536;
 
 					std::this_thread::sleep_for (std::chrono::milliseconds(50));	  
 
@@ -713,7 +714,8 @@ void run_report_loop(long requestorId, long instanceId, long ranFunctionId, long
 						e2sm_message_buf_style1, er_message_style1.encoded);
 
 					e2sim.encode_and_send_sctp_data(pdu_style1);
-					seqNum++;
+					// RICindicationSN is constrained to 0..65535 by E2AP.
+					seqNum = (seqNum + 1) % 65536;
 					std::this_thread::sleep_for (std::chrono::milliseconds(50));	  
 
 				}
@@ -725,6 +727,7 @@ void run_report_loop(long requestorId, long instanceId, long ranFunctionId, long
 
 // send single metrics through the indication report
 void encode_and_send_ric_indication_report_metrics_single(long seqNum, long requestorId, long instanceId, long ranFunctionId, long actionId) {
+    seqNum = indication_sequence(seqNum);
 
 	long fqival = 9;
 	long qcival = 9;
@@ -809,6 +812,9 @@ void encode_and_send_ric_indication_report_metrics_single(long seqNum, long requ
 
 // send buffer metrics through the indication report
 void encode_and_send_ric_indication_report_metrics_buffer(char* payload, int payload_len, long seqNum, long requestorId, long instanceId, long ranFunctionId, long actionId) {
+    // The OAI protobuf reporter reaches this path, not run_report_loop().
+    // Enforce the wire bound here even when using the installed E2AP library.
+    seqNum = indication_sequence(seqNum);
 
 	long fqival = 9;
 	long qcival = 9;

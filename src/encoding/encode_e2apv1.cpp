@@ -871,7 +871,9 @@ void encoding::generate_e2apv1_indication_request_parameterized(E2AP_PDU *e2ap_p
   ricind_ies4->id = ProtocolIE_ID_id_RICindicationSN;
   ricind_ies4->criticality = 0;
   ricind_ies4->value.present = pres3;
-  ricind_ies4->value.choice.RICindicationSN = seqNum;
+  // E2AP constrains RICindicationSN to 0..65535. Long-running KPM streams
+  // must wrap rather than terminating when the next indication reaches 65536.
+  ricind_ies4->value.choice.RICindicationSN = seqNum % 65536;
 
   //Indication type is REPORT
   pres3 = RICindication_IEs__value_PR_RICindicationType;
