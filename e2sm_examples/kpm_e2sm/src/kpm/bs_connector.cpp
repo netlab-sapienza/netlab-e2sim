@@ -3,6 +3,8 @@
 #include "encode_kpm.hpp"
 #include "kpm_callbacks.hpp"
 #include "indication_sequence.hpp"
+#include "report_timing.hpp"
+#include <cstdlib>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -141,7 +143,17 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
   int out_port = 6655;
   int in_port = 6600;
   boost::asio::io_service io_service;
-  std::chrono::milliseconds sleep_duration(500);
+  ReportTiming timing;
+  try {
+    timing = report_timing(std::getenv("XAPPBLOCK_E2_PERIOD_MS"));
+  } catch (const std::exception &error) {
+    fprintf(stderr, "KPM reporter configuration rejected: %s\n", error.what());
+    protobuf_reporter_active = false;
+    return;
+  }
+  const std::chrono::milliseconds sleep_duration(timing.period_ms);
+  fprintf(stderr, "KPM request period %d ms, immediate receive %d\n",
+          timing.period_ms, timing.immediate_receive);
 
   // out socket (to gnb)
   boost::asio::ip::udp::socket out_socket(io_service);
@@ -172,6 +184,7 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
 
   while (report_data_nrt_ric)
   {
+    const auto request_started = std::chrono::steady_clock::now();
     long requestorId, instanceId, ranFunctionId, actionId;
     std::vector<uint8_t> request;
     {
@@ -183,6 +196,7 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
       actionId = protobuf_action_id;
     }
 
+    if (!timing.immediate_receive) {
     fprintf(stderr, "timer expired for requestorId %ld, instanceId %ld, ranFunctionId %ld, actionId %ld: %d s\n",
             requestorId, instanceId, ranFunctionId, actionId, timer[0]);
     fprintf(stderr, "Sending indication request buffer to gnb, size %zu\n", request.size());
@@ -192,18 +206,20 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
       fprintf(stderr,"---%hhx\n", request[i]);
     }
     fprintf(stderr, "\n");
+    }
     
     // payload = (char*) "{\"timestamp\":1602706183796,\"slice_id\":0,\"dl_bytes\":53431,\"dl_thr_mbps\":2.39,\"ratio_granted_req_prb\":0.02,\"slice_prb\":6,\"dl_pkts\":200}";
     out_socket.send_to(boost::asio::buffer(request), remote_endpoint_out, 0, err);
 
-    fprintf(stderr, "Waiting for response from gnb...");
-    std::this_thread::sleep_for(sleep_duration);
+    if (!timing.immediate_receive) fprintf(stderr, "Waiting for response from gnb...");
+    if (!timing.immediate_receive) std::this_thread::sleep_for(sleep_duration);
     recvlen = in_socket.receive_from(boost::asio::buffer(recvbuf, sizeof(recvbuf) - 1), remote_endpoint_in);
-    fprintf(stderr, " recevied %lu bytes\n", recvlen);
+    if (!timing.immediate_receive) fprintf(stderr, " recevied %lu bytes\n", recvlen);
 
     // append null terminator to payload such that the buffer can be processed by the kind-of-stupid following encoders
     recvbuf[recvlen++] = '\0';
 
+    if (!timing.immediate_receive) {
     fprintf(stderr,"printing buf recevied from gnb:\n");
     for(int i = 0; i < recvlen; i++){
       fprintf(stderr, " %hhx ", recvbuf[i]);
@@ -211,11 +227,12 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
     fprintf(stderr, "\n");
 
     fprintf(stderr,"Sending report to ric\n");
+    }
 
     // send PDU
     if (recvlen > 0) {
       // fprintf(stderr, "Sending\n%s\n", recvbuf);
-      fprintf(stderr, "Encoding RIC Indication Report\n");
+      if (!timing.immediate_receive) fprintf(stderr, "Encoding RIC Indication Report\n");
       // encoding::generate_e2apv1_indication_report(e2ap_pdu, recvbuf, strlen(recvbuf), ric_req_id[0], 0, 0, 0);
       // fprintf(stderr, "RIC Indication Report successfully encoded\n");
       // e2sim->encode_and_send_sctp_data(e2ap_pdu);
@@ -224,6 +241,10 @@ void periodicDataReportOaiProtobuf(E2Sim *e2sim, int *timer, long seqNum, long *
       encode_and_send_ric_indication_report_metrics_buffer(recvbuf, recvlen, seqNum, requestorId, instanceId, ranFunctionId, actionId);
       seqNum = next_indication_sequence(seqNum);
     }
+    // A slow reply does not cause a catch-up burst. No sleep is inserted
+    // between source sampling and forwarding in the opt-in mode.
+    if (timing.immediate_receive)
+      std::this_thread::sleep_until(request_started + sleep_duration);
   }
   protobuf_reporter_active = false;
 }
